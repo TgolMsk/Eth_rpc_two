@@ -90,7 +90,6 @@ services:
       - --metrics-address=0.0.0.0
       - --metrics-port=5054
       - --checkpoint-sync-url=${LIGHTHOUSE_CHECKPOINT_SYNC_URL:-https://mainnet.checkpoint.sigp.io}
-      - --disable-deposit-contract-sync
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:5052/eth/v1/node/health || exit 1"]
       interval: 30s
