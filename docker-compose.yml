@@ -1,0 +1,214 @@
+services:
+  # ===================== Execution Client (Geth) =====================
+  geth:
+    image: ${GETH_IMAGE:-ethereum/client-go:stable}
+    container_name: eth-geth
+    restart: unless-stopped
+    stop_grace_period: 3m
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    ports:
+      - "${GETH_P2P_PORT:-30303}:30303/tcp"
+      - "${GETH_P2P_PORT:-30303}:30303/udp"
+    expose:
+      - "8545"
+      - "8546"
+      - "8551"
+      - "6060"
+    volumes:
+      - ${GETH_DATA_DIR:-./data/geth}:/root/.ethereum
+      - ${JWT_SECRET_PATH:-./jwt/jwt.hex}:/jwt/jwt.hex:ro
+    command:
+      - --${ETH_NETWORK:-mainnet}
+      - --http
+      - --http.addr=0.0.0.0
+      - --http.port=8545
+      - --http.vhosts=*
+      - --http.corsdomain=*
+      - --http.api=eth,net,web3,txpool,debug
+      - --ws
+      - --ws.addr=0.0.0.0
+      - --ws.port=8546
+      - --ws.origins=*
+      - --ws.api=eth,net,web3,txpool
+      - --authrpc.addr=0.0.0.0
+      - --authrpc.port=8551
+      - --authrpc.jwtsecret=/jwt/jwt.hex
+      - --authrpc.vhosts=*
+      - --metrics
+      - --metrics.addr=0.0.0.0
+      - --metrics.port=6060
+      - --cache=${GETH_CACHE:-4096}
+      - --maxpeers=${GETH_MAX_PEERS:-50}
+      - --syncmode=snap
+      - --db.engine=pebble
+      - --state.scheme=path
+      ${GETH_EXTRA_FLAGS:-}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8545 --post-data='{\"jsonrpc\":\"2.0\",\"method\":\"eth_syncing\",\"params\":[],\"id\":1}' --header='Content-Type:application/json' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "100m"
+        max-file: "5"
+    networks:
+      - eth-internal
+
+  # ===================== Consensus Client (Lighthouse) =====================
+  lighthouse:
+    image: ${LIGHTHOUSE_IMAGE:-sigp/lighthouse:latest}
+    container_name: eth-lighthouse
+    restart: unless-stopped
+    stop_grace_period: 3m
+    depends_on:
+      geth:
+        condition: service_started
+    ports:
+      - "${LIGHTHOUSE_P2P_PORT:-9000}:9000/tcp"
+      - "${LIGHTHOUSE_P2P_PORT:-9000}:9000/udp"
+    expose:
+      - "5052"
+      - "5054"
+    volumes:
+      - ${LIGHTHOUSE_DATA_DIR:-./data/lighthouse}:/root/.lighthouse
+      - ${JWT_SECRET_PATH:-./jwt/jwt.hex}:/jwt/jwt.hex:ro
+    command:
+      - lighthouse
+      - bn
+      - --network=${ETH_NETWORK:-mainnet}
+      - --execution-endpoint=http://geth:8551
+      - --execution-jwt=/jwt/jwt.hex
+      - --http
+      - --http-address=0.0.0.0
+      - --http-port=5052
+      - --metrics
+      - --metrics-address=0.0.0.0
+      - --metrics-port=5054
+      - --checkpoint-sync-url=${LIGHTHOUSE_CHECKPOINT_SYNC_URL:-https://mainnet.checkpoint.sigp.io}
+      - --disable-deposit-contract-sync
+      ${LIGHTHOUSE_EXTRA_FLAGS:-}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:5052/eth/v1/node/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+    logging:
+      driver: json-file
+      options:
+        max-size: "100m"
+        max-file: "5"
+    networks:
+      - eth-internal
+
+  # ===================== Nginx Reverse Proxy =====================
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: eth-nginx
+    restart: unless-stopped
+    depends_on:
+      geth:
+        condition: service_started
+    ports:
+      - "${NGINX_HTTP_PORT:-80}:80"
+      - "${NGINX_HTTPS_PORT:-443}:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+    networks:
+      - eth-internal
+
+  # ===================== Health Check Service =====================
+  healthcheck-svc:
+    build:
+      context: ./healthcheck
+      dockerfile: Dockerfile
+    container_name: eth-healthcheck
+    restart: unless-stopped
+    depends_on:
+      geth:
+        condition: service_started
+      lighthouse:
+        condition: service_started
+    expose:
+      - "8080"
+    ports:
+      - "${HEALTHCHECK_PORT:-8080}:8080"
+    environment:
+      - GETH_RPC_URL=http://geth:8545
+      - LIGHTHOUSE_API_URL=http://lighthouse:5052
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+    networks:
+      - eth-internal
+
+  # ===================== Prometheus =====================
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: eth-prometheus
+    restart: unless-stopped
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=30d
+      - --web.enable-lifecycle
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+    networks:
+      - eth-internal
+
+  # ===================== Grafana =====================
+  grafana:
+    image: grafana/grafana:latest
+    container_name: eth-grafana
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-changeme}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+    networks:
+      - eth-internal
+
+volumes:
+  prometheus-data:
+  grafana-data:
+
+networks:
+  eth-internal:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16

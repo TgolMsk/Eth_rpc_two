@@ -1,0 +1,24 @@
+# Environment
+.env
+
+# JWT secret
+jwt/jwt.hex
+
+# SSL certificates
+nginx/ssl/
+
+# Data directories
+data/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/

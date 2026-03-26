@@ -1,0 +1,33 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: "geth"
+    metrics_path: /debug/metrics/prometheus
+    static_configs:
+      - targets: ["geth:6060"]
+        labels:
+          client: "geth"
+          layer: "execution"
+
+  - job_name: "lighthouse"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["lighthouse:5054"]
+        labels:
+          client: "lighthouse"
+          layer: "consensus"
+
+  - job_name: "healthcheck"
+    metrics_path: /metrics
+    scrape_interval: 15s
+    static_configs:
+      - targets: ["healthcheck-svc:8080"]
+        labels:
+          service: "healthcheck"
+
+  - job_name: "nginx"
+    metrics_path: /nginx_status
+    static_configs:
+      - targets: ["nginx:80"]
