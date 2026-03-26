@@ -10,14 +10,11 @@ Type=oneshot
 RemainAfterExit=yes
 WorkingDirectory=__PROJECT_DIR__
 
-ExecStartPre=/usr/bin/docker compose pull --quiet
 ExecStart=/usr/bin/docker compose up -d --remove-orphans
 ExecStop=/usr/bin/docker compose down --timeout 180
 ExecReload=/usr/bin/docker compose up -d --remove-orphans
 
-# Restart policy: systemd restarts the compose stack on failure
-Restart=on-failure
-RestartSec=30
+TimeoutStartSec=300
 
 # Limits
 LimitNOFILE=65536
