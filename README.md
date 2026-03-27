@@ -5,35 +5,42 @@
 ## 架构概览
 
 ```
-                    ┌──────────────┐
-    Client ────────►│    Nginx     │ 限流 / 方法过滤 / 缓存
-                    │  (Port 80)   │
-                    └──────┬───────┘
-                           │
-              ┌────────────┼────────────┐
-              ▼            ▼            ▼
-        ┌──────────┐ ┌──────────┐ ┌────────────┐
-        │   Geth   │ │   Geth   │ │HealthCheck │
-        │  HTTP    │ │   WS     │ │  Service   │
-        │ :8545    │ │  :8546   │ │   :8080    │
-        └────┬─────┘ └──────────┘ └────────────┘
-             │ JWT Auth
-        ┌────▼──────┐
-        │Lighthouse │ Consensus Client
-        │  :5052    │
-        └───────────┘
+                         ┌──────────────┐
+    外部用户 ────────────►│    Nginx     │ 限流 / 方法过滤 / 缓存
+                         │  (Port 80)   │
+                         └──────┬───────┘
+                                │
+                   ┌────────────┼────────────┐
+                   ▼            ▼            ▼
+             ┌──────────┐ ┌──────────┐ ┌────────────┐
+             │   Geth   │ │   Geth   │ │HealthCheck │
+             │  HTTP    │ │   WS     │ │  Service   │
+             │ :8545    │ │  :8546   │ │   :8080    │
+             └──┬───▲───┘ └────▲─────┘ └────────────┘
+                │   │          │
+                │   │   ┌──────┘
+                │   │   │  127.0.0.1:8545 (HTTP)
+                │   │   │  127.0.0.1:8546 (WS)
+                │   │   │  无限流 / 全部方法可用
+                │   └───┼──────────────────────────── 宿主机本地服务
+                │       │                              (MEV Bot 等)
+                │ JWT Auth
+           ┌────▼──────┐
+           │Lighthouse │ Consensus Client
+           │  :5052    │
+           └───────────┘
 
-        ┌───────────┐     ┌─────────┐
-        │Prometheus │────►│ Grafana │ 监控面板
-        │  :9090    │     │  :3000  │
-        └───────────┘     └─────────┘
+           ┌───────────┐     ┌─────────┐
+           │Prometheus │────►│ Grafana │ 监控面板
+           │  :9090    │     │  :3000  │
+           └───────────┘     └─────────┘
 ```
 
 ## 组件说明
 
 | 组件 | 说明 | 端口 |
 |------|------|------|
-| **Geth** | 以太坊执行层客户端 (EL) | 8545 (HTTP), 8546 (WS), 30303 (P2P) |
+| **Geth** | 以太坊执行层客户端 (EL) | 127.0.0.1:8545 (HTTP), 127.0.0.1:8546 (WS), 30303 (P2P) |
 | **Lighthouse** | 以太坊共识层客户端 (CL) | 5052 (API), 9000 (P2P) |
 | **Nginx** | 反向代理、限流、方法过滤、响应缓存 | 80 (HTTP) |
 | **Health Check** | 节点健康检查 API + Prometheus 指标 | 8080 |
@@ -144,9 +151,22 @@ bash scripts/health-check.sh
 
 > Lighthouse 启用了 checkpoint sync，可在数分钟内完成共识层同步。
 
-## API 使用
+## RPC 接口
 
-### HTTP JSON-RPC
+本项目提供 **两条 RPC 接入路径**，适用于不同场景：
+
+### 接入路径总览
+
+| 路径 | 地址 | 限流 | 方法限制 | 缓存 | 适用场景 |
+|------|------|------|---------|------|---------|
+| **外部（经 Nginx）** | `http://<公网IP>` | 无限制 | 无限制 | 无 | 对外提供 RPC 服务 |
+| **本地直连 Geth** | `http://127.0.0.1:8545` | 无限制 | 无限制 | 无 | MEV Bot / 抢跑服务 / 内部调用 |
+
+> **安全说明**: Geth 的 8545/8546 端口仅绑定 `127.0.0.1`，外部网络无法访问，只有本机进程可以连接。
+
+### 路径一：外部 RPC（经 Nginx 代理）
+
+适用于对外提供公共 RPC 服务，具备限流、方法过滤和缓存保护。
 
 ```bash
 # 获取最新区块号
@@ -159,43 +179,67 @@ curl -X POST http://<server-ip> \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","method":"eth_getBalance","params":["0x...","latest"],"id":1}'
 
-# 获取链 ID
-curl -X POST http://<server-ip> \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}'
-```
-
-### WebSocket
-
-```bash
-# 使用 wscat 连接
+# WebSocket 连接
 wscat -c ws://<server-ip>/ws
-
-# 订阅新区块头
-> {"jsonrpc":"2.0","method":"eth_subscribe","params":["newHeads"],"id":1}
 ```
 
-### 可用的 RPC 方法
-
-通过 Nginx 暴露以下命名空间：
+**可用方法（全部开放，无过滤）：**
 
 | 命名空间 | HTTP | WebSocket | 说明 |
 |----------|------|-----------|------|
 | `eth_*` | ✅ | ✅ | 核心以太坊方法 |
 | `net_*` | ✅ | ✅ | 网络状态 |
 | `web3_*` | ✅ | ✅ | 工具方法 |
-| `txpool_*` | ❌ | ❌ | 已屏蔽 (安全) |
-| `debug_*` | ❌ | ❌ | 已屏蔽 (安全) |
-| `admin_*` | ❌ | ❌ | 已屏蔽 (安全) |
-| `personal_*` | ❌ | ❌ | 已屏蔽 (安全) |
+| `txpool_*` | ✅ | — | 交易池查询 |
+| `debug_*` | ✅ | — | 调试方法 |
+
+### 路径二：本地直连 Geth（MEV / 抢跑服务）
+
+适用于部署在同一台服务器上的高频交易、MEV 抢跑等对延迟和方法权限有要求的服务。
+
+**连接地址：**
+
+| 协议 | 地址 | 说明 |
+|------|------|------|
+| HTTP RPC | `http://127.0.0.1:8545` | 无限流，所有方法可用 |
+| WebSocket | `ws://127.0.0.1:8546` | 实时订阅 pending 交易 |
+
+```bash
+# 获取 pending 交易池内容（Nginx 路径不可用，此路径可用）
+curl -s -X POST http://127.0.0.1:8545 \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"txpool_content","params":[],"id":1}'
+
+# 查看 pending 交易概览
+curl -s -X POST http://127.0.0.1:8545 \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"txpool_inspect","params":[],"id":1}'
+
+# debug_traceCall 模拟交易执行
+curl -s -X POST http://127.0.0.1:8545 \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"debug_traceCall","params":[{"to":"0x...","data":"0x..."},"latest",{}],"id":1}'
+
+# WebSocket 订阅 pending 交易
+wscat -c ws://127.0.0.1:8546
+> {"jsonrpc":"2.0","method":"eth_subscribe","params":["newPendingTransactions"],"id":1}
+```
+
+**全部可用方法：**
+
+| 命名空间 | HTTP | WebSocket | 说明 |
+|----------|------|-----------|------|
+| `eth_*` | ✅ | ✅ | 核心以太坊方法 |
+| `net_*` | ✅ | ✅ | 网络状态 |
+| `web3_*` | ✅ | ✅ | 工具方法 |
+| `txpool_*` | ✅ | — | 交易池查询 (content/inspect/status) |
+| `debug_*` | ✅ | — | 调试方法 (traceCall/traceTransaction 等) |
 
 ## 安全特性
 
 ### Nginx 层
 
-- **限流**: HTTP RPC 30 req/s，WebSocket 10 req/s（每 IP）
-- **方法过滤**: 自动屏蔽 admin/debug/personal/miner 等危险方法
-- **响应缓存**: 对不可变数据（已确认的区块、交易）启用缓存
+- **纯透明代理**: 无限流、无方法过滤、无缓存
 - **安全头**: X-Content-Type-Options, X-Frame-Options
 
 ### 网络层
@@ -207,7 +251,8 @@ wscat -c ws://<server-ip>/ws
 ### 系统层
 
 - Docker 容器隔离
-- 内部 Docker 网络，RPC 端口不直接暴露
+- Geth RPC 端口仅绑定 `127.0.0.1`，外部无法直接访问
+- 内部 Docker 网络隔离
 - 系统内核参数调优
 
 ## 监控
@@ -333,14 +378,6 @@ docker compose exec lighthouse cat /jwt/jwt.hex
 
 # 检查 Auth RPC 端口
 docker compose logs lighthouse | grep "execution"
-```
-
-### Nginx 返回 429 (Too Many Requests)
-
-调整 `.env` 中的限流参数，或修改 `nginx/conf.d/rpc.conf` 中的 `limit_req` 配置：
-
-```nginx
-limit_req zone=rpc_limit burst=100 nodelay;
 ```
 
 ### 磁盘空间不足
